@@ -1,12 +1,18 @@
 // chatProvider.ts
 import * as vscode from 'vscode';
 import axios, { AxiosError } from 'axios';
+import { getLocaleStrings } from './localization';
+import { RetryManager } from './utils/retry';
 
 export class OllamaCodeFixerChatProvider {
     private _panel: vscode.WebviewPanel | undefined;
     private _disposables: vscode.Disposable[] = [];
+    private _strings = getLocaleStrings();
+    private _retryManager: RetryManager;
 
-    constructor(private readonly extensionUri: vscode.Uri) {}
+    constructor(private readonly extensionUri: vscode.Uri) {
+        this._retryManager = new RetryManager();
+    }
 
     public show() {
         if (this._panel) {
@@ -108,94 +114,107 @@ export class OllamaCodeFixerChatProvider {
         }
     }
 
-    private async getOllamaResponse(message: string): Promise<string> {        const config = vscode.workspace.getConfiguration('ollamaCodeFixer');
-        
-        // ВАЖНО: Убедись, что ollamaApiUrl здесь содержит ТОЛЬКО базовый URL (http://localhost:11434)
+    private async getOllamaResponse(message: string): Promise<string> {
+        const config = vscode.workspace.getConfiguration('ollamaCodeFixer');
         let baseApiUrl = config.get<string>('ollamaApiUrl', 'http://localhost:11434');
         
-        // Проверяем и корректируем URL
         try {
-            // Проверяем, является ли URL валидным
             new URL(baseApiUrl);
-            
-            // Убираем завершающий слэш, если он есть
-            baseApiUrl = baseApiUrl.replace(/\/+$/, '');} catch (error: unknown) {
-            const errorMessage = error instanceof Error ? error.message : 'Неизвестная ошибка при проверке URL';
-            console.error(`[OllamaCodeFixer] Invalid base URL ${baseApiUrl}: ${errorMessage}`);
-            baseApiUrl = 'http://localhost:11434'; // Используем значение по умолчанию при некорректном URL
-        }        const modelName = config.get<string>('modelName', 'llama2'); // Используем llama2 как модель по умолчанию
+            baseApiUrl = baseApiUrl.replace(/\/+$/, '');
+        } catch (error: unknown) {
+            const errorMessage = error instanceof Error ? error.message : this._strings.unknownError;
+            console.error(`[OllamaCodeFixer] ${this._strings.invalidUrl} ${baseApiUrl}: ${errorMessage}`);
+            baseApiUrl = 'http://localhost:11434';
+        }
+
+        const modelName = config.get<string>('modelName', 'llama2');
         const chatEndpoint = '/api/chat';
         const fullApiUrl = `${baseApiUrl}${chatEndpoint}`;
 
-        // Проверяем наличие модели перед отправкой запроса
+        const logLevel = config.get<string>('logLevel', 'info');
+
         try {
-            const modelCheckResponse = await axios.get(`${baseApiUrl}/api/tags`);
+            // Проверяем доступность модели с помощью RetryManager
+            const modelCheckResponse = await this._retryManager.withRetry(async () => {
+                return axios.get(`${baseApiUrl}/api/tags`);
+            });
+
             const availableModels = modelCheckResponse.data?.models || [];
-              if (!availableModels.some((model: any) => model.name === modelName)) {
-                const errorMessage = `Модель "${modelName}" не установлена.`;
-                console.error(`[OllamaCodeFixer] ${errorMessage}`);
-                
-                const installAction = 'Установить модель';
-                const changeAction = 'Изменить модель';
+            
+            if (!availableModels.some((model: any) => model.name === modelName)) {
+                console.error(`[OllamaCodeFixer] ${this._strings.modelNotInstalled.replace('{0}', modelName)}`);
                 
                 const choice = await vscode.window.showErrorMessage(
-                    errorMessage,
-                    installAction,
-                    changeAction
+                    this._strings.modelNotInstalled.replace('{0}', modelName),
+                    this._strings.installModel,
+                    this._strings.changeModel
                 );
 
-                if (choice === installAction) {
+                if (choice === this._strings.installModel) {
                     await this.installOllamaModel(modelName);
-                    return `Начата установка модели ${modelName}. Пожалуйста, повторите запрос после завершения установки.`;
-                } else if (choice === changeAction) {
+                    return this._strings.modelInstallStarted.replace('{0}', modelName);
+                } else if (choice === this._strings.changeModel) {
                     const newModel = await vscode.window.showQuickPick(
                         availableModels.map((m: any) => m.name),
                         {
-                            placeHolder: 'Выберите доступную модель'
+                            placeHolder: this._strings.selectAvailableModel
                         }
                     );
                     
                     if (newModel) {
                         await config.update('modelName', newModel, true);
-                        return this.getOllamaResponse(message); // Рекурсивно вызываем с новой моделью
+                        return this.getOllamaResponse(message);
                     }
                 }
                 
-                return errorMessage;
+                return this._strings.modelNotInstalled.replace('{0}', modelName);
             }
         } catch (error: unknown) {
             console.error('[OllamaCodeFixer] Failed to check available models:', error);
-            // Продолжаем выполнение, так как это только проверка
+            if (error instanceof Error) {
+                vscode.window.showWarningMessage(`Failed to check models: ${error.message}`);
+            }
         }
 
         const payload = {
             model: modelName,
-            messages: [
-                { role: "user", content: message }
-            ],
-            stream: false
-        };// Логирование перед запросом
-        const logLevel = config.get<string>('logLevel', 'info');
+            messages: [{ role: "user", content: message }],
+            stream: false,
+            options: {
+                temperature: config.get<number>('temperature', 0.7),
+                top_p: config.get<number>('topP', 0.9),
+                top_k: config.get<number>('topK', 40),
+                repeat_penalty: config.get<number>('repeatPenalty', 1.1),
+                presence_penalty: config.get<number>('presencePenalty', 0),
+                frequency_penalty: config.get<number>('frequencyPenalty', 0),
+                mirostat: config.get<number>('mirostat', 0),
+                mirostat_tau: config.get<number>('mirostatTau', 5.0),
+                mirostat_eta: config.get<number>('mirostatEta', 0.1),
+                num_ctx: config.get<number>('contextLength', 4096),
+                num_predict: config.get<number>('maxTokens', 2048),
+                stop: config.get<string[]>('stopSequences', ["[/INST]", "</s>", "```"]),
+                seed: config.get<number>('seed', -1)
+            }
+        };
+
         if (logLevel === 'debug') {
             console.debug('[OllamaCodeFixer CHAT] Request details:');
             console.debug(`- Base URL: ${baseApiUrl}`);
             console.debug(`- Full URL: ${fullApiUrl}`);
             console.debug(`- Model: ${modelName}`);
             console.debug(`- Payload: ${JSON.stringify(payload, null, 2)}`);
-            try {
-                const urlObj = new URL(fullApiUrl);
-                console.debug(`- URL parts: protocol=${urlObj.protocol}, host=${urlObj.host}, pathname=${urlObj.pathname}`);        } catch (error: unknown) {
-            const errorMessage = error instanceof Error ? error.message : 'Неизвестная ошибка при разборе URL';
-            console.debug(`- URL parsing failed: ${errorMessage}`);
-            }
-        }try {
-            // Проверяем валидность URL перед отправкой запроса
+        }
+
+        try {
             if (!fullApiUrl.startsWith('http://') && !fullApiUrl.startsWith('https://')) {
                 throw new Error(`Invalid URL protocol: ${fullApiUrl}`);
             }
 
-            const response = await axios.post(fullApiUrl, payload, {
-                timeout: config.get<number>('requestTimeout', 90000)
+            // Используем RetryManager для запроса к API
+            const response = await this._retryManager.withRetry(async () => {
+                return axios.post(fullApiUrl, payload, {
+                    timeout: config.get<number>('requestTimeout', 90000)
+                });
             });
             
             if (logLevel === 'debug') {
@@ -207,31 +226,40 @@ export class OllamaCodeFixerChatProvider {
                 : JSON.stringify(response.data);
 
         } catch (error: unknown) {
-            if (axios.isAxiosError(error)) {
-                let errorMessage = `Error calling Ollama API for chat: ${error.message}`;
-                  if (error.response) {
-                    errorMessage += ` Status: ${error.response.status}. Data: ${JSON.stringify(error.response.data)}`;
-                    if (logLevel === 'debug') {
-                        console.error(`[OllamaCodeFixer CHAT] Ollama API Error Response: ${JSON.stringify(error.response.data, null, 2)}`);
-                        console.error(`[OllamaCodeFixer CHAT] Request config that failed:`, error.config);
+            let errorMessage = 'Ошибка взаимодействия с Ollama: ';
+            
+            if (error instanceof AxiosError) {
+                errorMessage += error.message;
+                
+                if (error.response) {
+                    errorMessage += ` (Статус: ${error.response.status})`;
+                    if (error.response.data) {
+                        errorMessage += `\nДетали: ${JSON.stringify(error.response.data)}`;
                     }
                 } else if (error.request) {
-                    errorMessage += ' No response received from Ollama.';
+                    errorMessage += '\nНет ответа от сервера Ollama. Проверьте, что сервис запущен и доступен.';
                 }
                 
-                console.error('[OllamaCodeFixer CHAT] API Call Error:', errorMessage, error.config);
-                return `Ошибка взаимодействия с Ollama: ${errorMessage}`;
+                if (logLevel === 'debug') {
+                    console.error('[OllamaCodeFixer] Подробности ошибки API:', {
+                        message: error.message,
+                        config: error.config,
+                        response: error.response?.data
+                    });
+                }
+            } else if (error instanceof Error) {
+                errorMessage += error.message;
+            } else {
+                errorMessage += 'Неизвестная ошибка';
             }
             
-            // Обработка не-Axios ошибок
-            const errorMessage = error instanceof Error ? error.message : 'Неизвестная ошибка';
-            console.error('[OllamaCodeFixer CHAT] Non-Axios Error:', errorMessage);
-            return `Ошибка взаимодействия с Ollama: ${errorMessage}`;
+            console.error('[OllamaCodeFixer] Error:', errorMessage);
+            return errorMessage;
         }
     }    private async applyCodeToEditor(code: string) {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
-            vscode.window.showErrorMessage('Нет активного редактора для вставки кода');
+            vscode.window.showErrorMessage(this._strings.noActiveEditor);
             return;
         }
 
@@ -244,29 +272,48 @@ export class OllamaCodeFixerChatProvider {
             }
         });
 
-        vscode.window.showInformationMessage('Код успешно применён!');
-    }
-
-    private async installOllamaModel(modelName: string): Promise<void> {
+        vscode.window.showInformationMessage(this._strings.codeAppliedSuccess);
+    }    private async installOllamaModel(modelName: string): Promise<void> {
         const terminal = vscode.window.createTerminal('Ollama Model Installation');
         terminal.show();
         terminal.sendText(`ollama pull ${modelName}`);
         
         // Показываем информационное сообщение
         vscode.window.showInformationMessage(
-            `Установка модели ${modelName}. Пожалуйста, дождитесь завершения в терминале.`,
-            'Понятно'
+            this._strings.modelInstallProgress.replace('{0}', modelName),
+            this._strings.understood
         );
+    }
+
+    private async getAvailableModels(baseUrl: string): Promise<string[]> {
+        try {
+            const response = await axios.get(`${baseUrl}/api/tags`);
+            return response.data?.models?.map((m: any) => m.name) || [];
+        } catch (error) {
+            console.error('[OllamaCodeFixer] Failed to fetch available models:', error);
+            return [];
+        }
+    }
+
+    private async showModelSelector(): Promise<string | undefined> {
+        const config = vscode.workspace.getConfiguration('ollamaCodeFixer');
+        const baseUrl = config.get<string>('ollamaApiUrl', 'http://localhost:11434');
+        
+        const models = await this.getAvailableModels(baseUrl);
+        
+        return vscode.window.showQuickPick(models, {
+            placeHolder: this._strings.selectModel
+        });
     }
 
     private getWebviewContent(): string {
         return `
         <!DOCTYPE html>
-        <html lang="ru">
+        <html lang="${this._strings.language}">
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Ollama Code Fixer Chat</title>
+            <title>${this._strings.chatTitle}</title>
             <style>
                 * {
                     margin: 0;
@@ -474,26 +521,26 @@ export class OllamaCodeFixerChatProvider {
         </head>
         <body>
             <div class="header">
-                <h1>🦙 Ollama Code Fixer</h1>
-                <p>Задайте вопрос или выберите готовую подсказку</p>
+                <h1>${this._strings.chatTitle}</h1>
+                <p>${this._strings.welcomeMessage}</p>
             </div>
 
             <div class="prompts-section">
-                <div class="prompts-title">Быстрые подсказки:</div>
+                <div class="prompts-title">${this._strings.quickPromptsTitle}</div>
                 <div class="prompt-buttons">
-                    <button class="prompt-btn" onclick="insertPrompt('Исправь ошибки в этом коде')">🔧 Исправить ошибки</button>
-                    <button class="prompt-btn" onclick="insertPrompt('Оптимизируй этот код для лучшей производительности')">⚡ Оптимизировать</button>
-                    <button class="prompt-btn" onclick="insertPrompt('Добавь комментарии к этому коду')">📝 Добавить комментарии</button>
-                    <button class="prompt-btn" onclick="insertPrompt('Рефактори этот код для лучшей читаемости')">🔄 Рефакторинг</button>
-                    <button class="prompt-btn" onclick="insertPrompt('Найди потенциальные уязвимости в коде')">🔒 Проверить безопасность</button>
-                    <button class="prompt-btn" onclick="insertPrompt('Создай unit тесты для этого кода')">🧪 Создать тесты</button>
-                    <button class="prompt-btn" onclick="insertPrompt('Объясни что делает этот код')">❓ Объяснить код</button>
+                    <button class="prompt-btn" onclick="insertPrompt('${this._strings.fixErrorsPrompt}')">${this._strings.fixErrorsPrompt}</button>
+                    <button class="prompt-btn" onclick="insertPrompt('${this._strings.optimizePrompt}')">${this._strings.optimizePrompt}</button>
+                    <button class="prompt-btn" onclick="insertPrompt('${this._strings.addCommentsPrompt}')">${this._strings.addCommentsPrompt}</button>
+                    <button class="prompt-btn" onclick="insertPrompt('${this._strings.refactorPrompt}')">${this._strings.refactorPrompt}</button>
+                    <button class="prompt-btn" onclick="insertPrompt('${this._strings.checkSecurityPrompt}')">${this._strings.checkSecurityPrompt}</button>
+                    <button class="prompt-btn" onclick="insertPrompt('${this._strings.createTestsPrompt}')">${this._strings.createTestsPrompt}</button>
+                    <button class="prompt-btn" onclick="insertPrompt('${this._strings.explainCodePrompt}')">${this._strings.explainCodePrompt}</button>
                 </div>
             </div>
 
             <div class="chat-container" id="chatContainer">
                 <div class="message assistant">
-                    <div>Привет! Я помогу вам с анализом и исправлением кода. Выберите готовую подсказку выше или задайте свой вопрос.</div>
+                    <div>${this._strings.welcomeMessage}</div>
                     <div class="message-time">${new Date().toLocaleTimeString()}</div>
                 </div>
             </div>
@@ -503,15 +550,21 @@ export class OllamaCodeFixerChatProvider {
                     <textarea 
                         class="message-input" 
                         id="messageInput" 
-                        placeholder="Введите ваш вопрос или вставьте код..."
+                        placeholder="${this._strings.inputPlaceholder}"
                         rows="1"
                     ></textarea>
-                    <button class="send-btn" id="sendBtn" onclick="sendMessage()">Отправить</button>
+                    <button class="send-btn" id="sendBtn" onclick="sendMessage()">${this._strings.sendButton}</button>
                 </div>
             </div>
 
             <script>
                 const vscode = acquireVsCodeApi();
+                const strings = ${JSON.stringify({
+                    copyButton: this._strings.copyButton,
+                    applyButton: this._strings.applyButton,
+                    copied: this._strings.copyButton,
+                    loadingMessage: this._strings.loadingMessage
+                })};
                 let isLoading = false;
 
                 function insertPrompt(prompt) {
@@ -544,8 +597,8 @@ export class OllamaCodeFixerChatProvider {
                     content = content.replace(/\`\`\`([\\s\\S]*?)\`\`\`/g, (match, code) => {
                         return '<div class="code-block">' +
                                '<div class="code-actions">' +
-                               '<button class="code-btn" onclick="copyCode(this)">Копировать</button>' +
-                               '<button class="code-btn" onclick="applyCode(this)">Применить</button>' +
+                               '<button class="code-btn" onclick="copyCode(this)">' + strings.copyButton + '</button>' +
+                               '<button class="code-btn" onclick="applyCode(this)">' + strings.applyButton + '</button>' +
                                '</div>' +
                                '<pre>' + code.trim() + '</pre>' +
                                '</div>';
@@ -576,7 +629,7 @@ export class OllamaCodeFixerChatProvider {
                         const loadingDiv = document.createElement('div');
                         loadingDiv.className = 'loading';
                         loadingDiv.innerHTML = 
-                            '<div>Ollama обрабатывает запрос...</div>' +
+                            '<div>' + strings.loadingMessage + '</div>' +
                             '<div class="loading-dots">' +
                             '<div class="loading-dot"></div>' +
                             '<div class="loading-dot"></div>' +
@@ -590,9 +643,9 @@ export class OllamaCodeFixerChatProvider {
                 function copyCode(button) {
                     const codeBlock = button.closest('.code-block').querySelector('pre');
                     navigator.clipboard.writeText(codeBlock.textContent);
-                    button.textContent = 'Скопировано!';
+                    button.textContent = strings.copied;
                     setTimeout(() => {
-                        button.textContent = 'Копировать';
+                        button.textContent = strings.copyButton;
                     }, 2000);
                 }
 
@@ -632,27 +685,14 @@ export class OllamaCodeFixerChatProvider {
         </html>`;
     }    public dispose() {
         while (this._disposables.length) {
-            const x = this._disposables.pop();
-            if (x) {
-                x.dispose();
+            const disposable = this._disposables.pop();
+            if (disposable) {
+                disposable.dispose();
             }
         }
-        this._panel?.dispose();
+        if (this._panel) {
+            this._panel.dispose();
+        }
         this._panel = undefined;
     }
 }
-
-// Добавьте в ваш основной файл extension.ts:
-/*
-import { OllamaCodeFixerChatProvider } from './chatProvider';
-
-// В функции activate добавьте:
-const chatProvider = new OllamaCodeFixerChatProvider(context.extensionUri);
-
-// Регистрируем команду для открытия чата
-let disposableChat = vscode.commands.registerCommand('ollama-code-fixer.openChat', () => {
-    chatProvider.show();
-});
-
-context.subscriptions.push(disposableChat);
-*/

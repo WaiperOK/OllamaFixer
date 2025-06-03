@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import axios, { AxiosError, AxiosResponse } from 'axios';
 import { OllamaCodeFixerChatProvider } from './chatProvider';
+import { RetryManager } from './utils/retry';
 
 // Интерфейс для ответа Ollama (упрощенный)
 interface OllamaGenerateResponse {
@@ -33,11 +34,13 @@ async function getCorrectionFromOllama(
   codeSnippet: string,
   languageId: string
 ): Promise<string | null> {
+  const config = vscode.workspace.getConfiguration('ollamaCodeFixer');
   const apiUrl = getConfigOrThrow<string>('ollamaApiUrl', 'http://localhost:11434/api/generate');
   const modelName = getConfigOrThrow<string>('modelName', 'gemma:4b');
   const requestTimeout = getConfigOrThrow<number>('requestTimeout', 90000);
   const enableNotifications = getConfigOrThrow<boolean>('enableNotifications', true);
   const logLevel = getConfigOrThrow<string>('logLevel', 'info');
+  const retryManager = new RetryManager();
 
   const promptStructure = getConfigOrThrow<{ prefix: string; suffix: string }>(
     'promptStructure',
@@ -56,14 +59,17 @@ async function getCorrectionFromOllama(
   }
 
   try {
-    const response: AxiosResponse<OllamaGenerateResponse> = await axios.post(
-      apiUrl,
-      {
-        model: modelName,
-        prompt: prompt,
-        stream: false,
-      },
-      { timeout: requestTimeout }
+    // Используем RetryManager для повторных попыток при ошибках
+    const response: AxiosResponse<OllamaGenerateResponse> = await retryManager.withRetry(
+      async () => axios.post(
+        apiUrl,
+        {
+          model: modelName,
+          prompt: prompt,
+          stream: false,
+        },
+        { timeout: requestTimeout }
+      )
     );
 
     let correctedCode = response.data.response.trim();
@@ -89,20 +95,46 @@ async function getCorrectionFromOllama(
     return correctedCode;
 
   } catch (error) {
-    const err = error as AxiosError;
-    let errorMessage = `Error calling Ollama API: ${err.message}.`;
-    if (err.response) {
-      errorMessage += ` Status: ${err.response.status}. Data: ${JSON.stringify(err.response.data)}`;
-      if (logLevel === 'debug') {
-        console.log(`[OllamaCodeFixer] Ollama API Error Response: ${JSON.stringify(err.response.data)}`);
+    let errorMessage: string;
+    
+    if (error instanceof AxiosError) {
+      if (error.response) {
+        errorMessage = `Error calling Ollama API: ${error.message}. Status: ${error.response.status}`;
+        if (error.response.data) {
+          errorMessage += `. Data: ${JSON.stringify(error.response.data)}`;
+        }
+      } else if (error.request) {
+        errorMessage = 'No response received from Ollama. Please check if the service is running and accessible.';
+      } else {
+        errorMessage = `Error configuring request: ${error.message}`;
       }
-    } else if (err.request) {
-      errorMessage += ' No response received from Ollama. Check if Ollama is running and accessible.';
+      
+      if (error.code === 'ECONNREFUSED') {
+        errorMessage = 'Could not connect to Ollama server. Please ensure the service is running.';
+      } else if (error.code === 'ETIMEDOUT') {
+        errorMessage = 'Request to Ollama server timed out. The server might be overloaded.';
+      }
+      
+      if (logLevel === 'debug') {
+        console.error('[OllamaCodeFixer] API Call Error:', {
+          message: error.message,
+          code: error.code,
+          config: error.config,
+          response: error.response?.data
+        });
+      }
+    } else if (error instanceof Error) {
+      errorMessage = `Unexpected error: ${error.message}`;
+      console.error('[OllamaCodeFixer] Unexpected Error:', error);
+    } else {
+      errorMessage = 'An unknown error occurred';
+      console.error('[OllamaCodeFixer] Unknown Error:', error);
     }
-    console.error('[OllamaCodeFixer] API Call Error:', errorMessage, err.config);
+    
     if (enableNotifications) {
       vscode.window.showErrorMessage(errorMessage);
     }
+    
     return null;
   }
 }
@@ -183,18 +215,45 @@ export function activate(context: vscode.ExtensionContext) {
   statusBarItem.text = 'Ollama: Checking...';
   statusBarItem.show();
 
-  const apiUrl = getConfigOrThrow<string>('ollamaApiUrl', 'http://localhost:11434/api/generate');
-  axios.get(apiUrl)
-    .then(() => {
+  const retryManager = new RetryManager();
+  const config = vscode.workspace.getConfiguration('ollamaCodeFixer');
+  let baseUrl = config.get<string>('ollamaApiUrl', 'http://localhost:11434');
+
+  try {
+    const urlObj = new URL(baseUrl);
+    baseUrl = `${urlObj.protocol}//${urlObj.host}`;
+  } catch (e) {
+    console.error("[OllamaCodeFixer] Invalid ollamaApiUrl, using default base.", e);
+    baseUrl = 'http://localhost:11434';
+  }
+
+  // Периодическая проверка статуса API
+  const checkApiStatus = async () => {
+    try {
+      await retryManager.withRetry(async () => axios.get(baseUrl, { timeout: 5000 }));
       statusBarItem.text = 'Ollama: Active';
       statusBarItem.tooltip = 'Ollama API is running';
-    })
-    .catch(() => {
+      statusBarItem.backgroundColor = undefined;
+    } catch (error) {
       statusBarItem.text = 'Ollama: Offline';
       statusBarItem.tooltip = 'Ollama API is not accessible';
-    });
+      statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
 
-  context.subscriptions.push(statusBarItem);
+      if (error instanceof AxiosError) {
+        console.error('[OllamaCodeFixer] API Status Check Error:', {
+          message: error.message,
+          code: error.code,
+          response: error.response?.status
+        });
+      }
+    }
+  };
+
+  // Выполняем первоначальную проверку
+  checkApiStatus();
+
+  // Настраиваем периодическую проверку каждые 30 секунд
+  const statusCheckInterval = setInterval(checkApiStatus, 30000);
 
   // Регистрация представления в боковой панели
   const provider = new OllamaCodeFixerViewProvider();
@@ -234,11 +293,15 @@ export function activate(context: vscode.ExtensionContext) {
 
         progress.report({ increment: 0, message: 'Sending code to local Ollama AI...' });
 
-        if (token.isCancellationRequested) return;
+        if (token.isCancellationRequested) {
+          return;
+        }
 
         const correctedCode = await getCorrectionFromOllama(selectedText, languageId);
 
-        if (token.isCancellationRequested) return;
+        if (token.isCancellationRequested) {
+          return;
+        }
 
         if (correctedCode === null) {
           return;
@@ -284,45 +347,59 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   // Команда для проверки статуса API
-let disposableCheckApi = vscode.commands.registerCommand('ollama-code-fixer.checkApiStatus', async () => {
-  let baseUrl = getConfigOrThrow<string>('ollamaApiUrl', 'http://localhost:11434/api/generate');
-  // Пытаемся получить базовый URL, если в настройках указан полный путь
-  try {
-    const urlObj = new URL(baseUrl);
-    baseUrl = `<span class="math-inline">\{urlObj\.protocol\}//</span>{urlObj.host}/`; // Оставляем только протокол и хост (например, http://localhost:11434/)
-  } catch (e) {
-    // Если URL в настройках некорректен, используем дефолтный базовый
-    console.error("[OllamaCodeFixer] Invalid ollamaApiUrl for health check, using default base.", e);
-    baseUrl = 'http://localhost:11434/';
-  }
-
-  console.log(`[OllamaCodeFixer] Checking API status at: ${baseUrl}`); // Логируем URL для проверки
-
-  try {
-    await axios.get(baseUrl, { timeout: 5000 }); // GET на базовый URL
-    vscode.window.showInformationMessage('Ollama API is accessible! Base URL check successful.');
-    // Дополнительно можно проверить и конкретный эндпоинт, если нужно, но методом POST
-  } catch (error) {
-    const axiosError = error as AxiosError;
-    let statusMessage = 'Ollama API is not accessible.';
-    if (axiosError.response) {
-        statusMessage += ` Status: ${axiosError.response.status}`;
-    } else if (axiosError.request) {
-        statusMessage += ' No response received.';
-    } else {
-        statusMessage += ` Error: ${axiosError.message}`;
+  let disposableCheckApi = vscode.commands.registerCommand('ollama-code-fixer.checkApiStatus', async () => {
+    let baseUrl = getConfigOrThrow<string>('ollamaApiUrl', 'http://localhost:11434');
+    
+    try {
+      const urlObj = new URL(baseUrl);
+      baseUrl = `${urlObj.protocol}//${urlObj.host}`;
+    } catch (e) {
+      console.error("[OllamaCodeFixer] Invalid ollamaApiUrl for health check, using default base.", e);
+      baseUrl = 'http://localhost:11434';
     }
-    console.error('[OllamaCodeFixer] checkApiStatus Error:', statusMessage, error);
-    vscode.window.showErrorMessage(statusMessage);
-  }
-});
+
+    console.log(`[OllamaCodeFixer] Checking API status at: ${baseUrl}`);
+
+    const retryManager = new RetryManager();
+
+    try {
+      await retryManager.withRetry(async () => {
+        return axios.get(baseUrl, { timeout: 5000 });
+      });
+      
+      vscode.window.showInformationMessage('Ollama API is accessible! Base URL check successful.');
+    } catch (error) {
+      let statusMessage = 'Ollama API is not accessible.';
+      
+      if (error instanceof AxiosError) {
+        if (error.response) {
+          statusMessage += ` Status: ${error.response.status}`;
+        } else if (error.request) {
+          statusMessage += ' No response received.';
+        } else {
+          statusMessage += ` Error: ${error.message}`;
+        }
+      } else {
+        statusMessage += ' Unknown error occurred.';
+      }
+      
+      console.error('[OllamaCodeFixer] checkApiStatus Error:', error);
+      vscode.window.showErrorMessage(statusMessage);
+    }
+  });
 
   // Команда для открытия чата
   let disposableChat = vscode.commands.registerCommand('ollama-code-fixer.openChat', () => {
     chatProvider.show();
   });
 
-  context.subscriptions.push(disposableFix, disposableCheckApi, disposableChat);
+  context.subscriptions.push(
+    disposableFix,
+    disposableCheckApi,
+    disposableChat,
+    statusBarItem,
+    { dispose: () => clearInterval(statusCheckInterval) }
+  );
 }
 
 export function deactivate() {

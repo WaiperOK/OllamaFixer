@@ -65,20 +65,47 @@
     "configuration": {
       "title": "Ollama Code Fixer",
       "properties": {
+        "ollamaCodeFixer.language": {
+          "type": "string",
+          "enum": ["en", "ru"],
+          "default": "en",
+          "description": "Interface language / Язык интерфейса"
+        },
         "ollamaCodeFixer.ollamaApiUrl": {
           "type": "string",
-          "default": "http://localhost:11434/api/generate",
-          "description": "URL for the Ollama API /api/generate endpoint."
+          "default": "http://localhost:11434",
+          "description": "URL for the Ollama API (base URL only)."
         },
         "ollamaCodeFixer.modelName": {
           "type": "string",
-          "default": "gemma:4b",
-          "description": "The Ollama model to use (e.g., 'gemma:12b', 'codellama:latest'). Make sure it's pulled in Ollama."
+          "default": "llama2",
+          "description": "The Ollama model to use (e.g., 'llama2', 'codellama', 'mistral'). Make sure it's pulled in Ollama."
         },
         "ollamaCodeFixer.requestTimeout": {
           "type": "integer",
           "default": 90000,
           "description": "Timeout in milliseconds for requests to the Ollama API."
+        },
+        "ollamaCodeFixer.maxRetries": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Maximum number of retry attempts for failed API requests."
+        },
+        "ollamaCodeFixer.retryDelay": {
+          "type": "integer",
+          "default": 1000,
+          "minimum": 100,
+          "maximum": 10000,
+          "description": "Delay in milliseconds between retry attempts."
+        },
+        "ollamaCodeFixer.retryBackoffMultiplier": {
+          "type": "number",
+          "default": 1.5,
+          "minimum": 1.0,
+          "maximum": 3.0,
+          "description": "Multiplier for increasing delay between retries."
         },
         "ollamaCodeFixer.enableNotifications": {
           "type": "boolean",
@@ -87,14 +114,65 @@
         },
         "ollamaCodeFixer.logLevel": {
           "type": "string",
-          "enum": [
-            "error",
-            "warn",
-            "info",
-            "debug"
-          ],
+          "enum": ["error", "warn", "info", "debug"],
           "default": "info",
           "description": "Set the logging level for Ollama Code Fixer."
+        },
+        "ollamaCodeFixer.temperature": {
+          "type": "number",
+          "default": 0.7,
+          "minimum": 0.0,
+          "maximum": 2.0,
+          "description": "Temperature for model responses (0.0 - 2.0). Lower values make responses more focused and deterministic."
+        },
+        "ollamaCodeFixer.topP": {
+          "type": "number",
+          "default": 0.9,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Top-p (nucleus sampling) value. Lower values make responses more focused."
+        },
+        "ollamaCodeFixer.topK": {
+          "type": "integer",
+          "default": 40,
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Top-k value for sampling. Lower values make responses more focused."
+        },
+        "ollamaCodeFixer.contextLength": {
+          "type": "integer",
+          "default": 4096,
+          "description": "Maximum context length for the model."
+        },
+        "ollamaCodeFixer.repeatPenalty": {
+          "type": "number",
+          "default": 1.1,
+          "minimum": 0.0,
+          "maximum": 2.0,
+          "description": "Penalty for repeating tokens. Higher values reduce repetition."
+        },
+        "ollamaCodeFixer.stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": ["[/INST]", "</s>", "```"],
+          "description": "Sequences that will stop generation when encountered."
+        },
+        "ollamaCodeFixer.seed": {
+          "type": "integer",
+          "default": -1,
+          "description": "Random seed for reproducible responses (-1 for random)."
+        },
+        "ollamaCodeFixer.maxTokens": {
+          "type": "integer",
+          "default": 2048,
+          "description": "Maximum number of tokens to generate."
+        },
+        "ollamaCodeFixer.formatResponse": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically format code in responses."
         },
         "ollamaCodeFixer.promptStructure": {
           "type": "object",
