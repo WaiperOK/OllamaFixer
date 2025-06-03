@@ -28,10 +28,10 @@ export class OllamaCodeFixerChatProvider {
 
             this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
         }
-    }
-
-    private setupMessageHandling() {
-        if (!this._panel) return;
+    }    private setupMessageHandling() {
+        if (!this._panel) {
+            return;
+        }
 
         this._panel.webview.onDidReceiveMessage(
             async (message) => {
@@ -53,10 +53,10 @@ export class OllamaCodeFixerChatProvider {
             undefined,
             this._disposables
         );
-    }
-
-    private async handleChatMessage(userMessage: string) {
-        if (!this._panel) return;
+    }    private async handleChatMessage(userMessage: string) {
+        if (!this._panel) {
+            return;
+        }
 
         // Отправляем сообщение пользователя в чат
         this._panel.webview.postMessage({
@@ -85,13 +85,18 @@ export class OllamaCodeFixerChatProvider {
                     content: response,
                     timestamp: new Date().toLocaleTimeString()
                 }
-            });
-        } catch (error) {
+            });        } catch (error: unknown) {
+            const errorMessage = error instanceof Error 
+                ? error.message 
+                : typeof error === 'string'
+                    ? error
+                    : 'Произошла неизвестная ошибка';
+                    
             this._panel.webview.postMessage({
                 command: 'addMessage',
                 message: {
                     type: 'error',
-                    content: `Ошибка: ${error}`,
+                    content: `Ошибка: ${errorMessage}`,
                     timestamp: new Date().toLocaleTimeString()
                 }
             });
@@ -103,63 +108,127 @@ export class OllamaCodeFixerChatProvider {
         }
     }
 
-    private async getOllamaResponse(message: string): Promise<string> {
-    const config = vscode.workspace.getConfiguration('ollamaCodeFixer');
-    // ВАЖНО: Убедись, что ollamaApiUrl здесь содержит ТОЛЬКО базовый URL (http://localhost:11434)
-    let baseApiUrl = config.get<string>('ollamaApiUrl', 'http://localhost:11434'); 
-    const modelName = config.get<string>('modelName', 'gemma:4b');
-
-    // Определяем, какой эндпоинт и какой payload использовать для чата
-    // Рекомендую использовать /api/chat для чата
-    const chatEndpoint = '/api/chat'; 
-    const fullApiUrl = baseApiUrl.replace(/\/$/, '') + chatEndpoint; // Убираем слэш в конце baseApiUrl, если он есть
-
-    const payload = {
-        model: modelName,
-        messages: [ // Для /api/chat нужен массив messages
-            { role: "user", content: message }
-        ],
-        stream: false
-    };
-
-    // Логирование перед запросом
-    const logLevel = config.get<string>('logLevel', 'info');
-    if (logLevel === 'debug') {
-        console.debug(`[OllamaCodeFixer CHAT] Sending request to: POST ${fullApiUrl}`);
-        console.debug(`[OllamaCodeFixer CHAT] Payload: ${JSON.stringify(payload, null, 2)}`);
-    }
-
-    try {
-        const response = await axios.post(fullApiUrl, payload, {
-            timeout: config.get<number>('requestTimeout', 90000)
-        });
+    private async getOllamaResponse(message: string): Promise<string> {        const config = vscode.workspace.getConfiguration('ollamaCodeFixer');
         
-        if (logLevel === 'debug') {
-            console.debug(`[OllamaCodeFixer CHAT] Raw response from model: ${JSON.stringify(response.data, null, 2)}`);
-        }
-        // Для /api/chat ответ обычно в response.data.message.content
-        return response.data.message && response.data.message.content ? response.data.message.content.trim() : JSON.stringify(response.data);
+        // ВАЖНО: Убедись, что ollamaApiUrl здесь содержит ТОЛЬКО базовый URL (http://localhost:11434)
+        let baseApiUrl = config.get<string>('ollamaApiUrl', 'http://localhost:11434');
+        
+        // Проверяем и корректируем URL
+        try {
+            // Проверяем, является ли URL валидным
+            new URL(baseApiUrl);
+            
+            // Убираем завершающий слэш, если он есть
+            baseApiUrl = baseApiUrl.replace(/\/+$/, '');} catch (error: unknown) {
+            const errorMessage = error instanceof Error ? error.message : 'Неизвестная ошибка при проверке URL';
+            console.error(`[OllamaCodeFixer] Invalid base URL ${baseApiUrl}: ${errorMessage}`);
+            baseApiUrl = 'http://localhost:11434'; // Используем значение по умолчанию при некорректном URL
+        }        const modelName = config.get<string>('modelName', 'llama2'); // Используем llama2 как модель по умолчанию
+        const chatEndpoint = '/api/chat';
+        const fullApiUrl = `${baseApiUrl}${chatEndpoint}`;
 
-    } catch (error) {
-        const axiosError = error as AxiosError;
-        let errorMessage = `Error calling Ollama API for chat: ${axiosError.message}.`;
-        if (axiosError.response) {
-            errorMessage += ` Status: ${axiosError.response.status}. Data: ${JSON.stringify(axiosError.response.data)}`;
-            if (logLevel === 'debug') {
-                console.error(`[OllamaCodeFixer CHAT] Ollama API Error Response: ${JSON.stringify(axiosError.response.data, null, 2)}`);
-                console.error(`[OllamaCodeFixer CHAT] Request config that failed:`, axiosError.config);
+        // Проверяем наличие модели перед отправкой запроса
+        try {
+            const modelCheckResponse = await axios.get(`${baseApiUrl}/api/tags`);
+            const availableModels = modelCheckResponse.data?.models || [];
+              if (!availableModels.some((model: any) => model.name === modelName)) {
+                const errorMessage = `Модель "${modelName}" не установлена.`;
+                console.error(`[OllamaCodeFixer] ${errorMessage}`);
+                
+                const installAction = 'Установить модель';
+                const changeAction = 'Изменить модель';
+                
+                const choice = await vscode.window.showErrorMessage(
+                    errorMessage,
+                    installAction,
+                    changeAction
+                );
+
+                if (choice === installAction) {
+                    await this.installOllamaModel(modelName);
+                    return `Начата установка модели ${modelName}. Пожалуйста, повторите запрос после завершения установки.`;
+                } else if (choice === changeAction) {
+                    const newModel = await vscode.window.showQuickPick(
+                        availableModels.map((m: any) => m.name),
+                        {
+                            placeHolder: 'Выберите доступную модель'
+                        }
+                    );
+                    
+                    if (newModel) {
+                        await config.update('modelName', newModel, true);
+                        return this.getOllamaResponse(message); // Рекурсивно вызываем с новой моделью
+                    }
+                }
+                
+                return errorMessage;
             }
-        } else if (axiosError.request) {
-            errorMessage += ' No response received from Ollama.';
+        } catch (error: unknown) {
+            console.error('[OllamaCodeFixer] Failed to check available models:', error);
+            // Продолжаем выполнение, так как это только проверка
         }
-        console.error('[OllamaCodeFixer CHAT] API Call Error:', errorMessage, axiosError.config);
-        // Вместо того, чтобы бросать ошибку дальше, можно вернуть ее текст, чтобы он отобразился в чате
-        // throw new Error(errorMessage); // Это приведет к тому, что в handleChatMessage сработает catch
-        return `Ошибка взаимодействия с Ollama: ${errorMessage}`; // Чтобы ошибка отобразилась в чате как сообщение
-    }
-}
 
-    private async applyCodeToEditor(code: string) {
+        const payload = {
+            model: modelName,
+            messages: [
+                { role: "user", content: message }
+            ],
+            stream: false
+        };// Логирование перед запросом
+        const logLevel = config.get<string>('logLevel', 'info');
+        if (logLevel === 'debug') {
+            console.debug('[OllamaCodeFixer CHAT] Request details:');
+            console.debug(`- Base URL: ${baseApiUrl}`);
+            console.debug(`- Full URL: ${fullApiUrl}`);
+            console.debug(`- Model: ${modelName}`);
+            console.debug(`- Payload: ${JSON.stringify(payload, null, 2)}`);
+            try {
+                const urlObj = new URL(fullApiUrl);
+                console.debug(`- URL parts: protocol=${urlObj.protocol}, host=${urlObj.host}, pathname=${urlObj.pathname}`);        } catch (error: unknown) {
+            const errorMessage = error instanceof Error ? error.message : 'Неизвестная ошибка при разборе URL';
+            console.debug(`- URL parsing failed: ${errorMessage}`);
+            }
+        }try {
+            // Проверяем валидность URL перед отправкой запроса
+            if (!fullApiUrl.startsWith('http://') && !fullApiUrl.startsWith('https://')) {
+                throw new Error(`Invalid URL protocol: ${fullApiUrl}`);
+            }
+
+            const response = await axios.post(fullApiUrl, payload, {
+                timeout: config.get<number>('requestTimeout', 90000)
+            });
+            
+            if (logLevel === 'debug') {
+                console.debug(`[OllamaCodeFixer CHAT] Raw response from model: ${JSON.stringify(response.data, null, 2)}`);
+            }
+
+            return response.data.message && response.data.message.content 
+                ? response.data.message.content.trim() 
+                : JSON.stringify(response.data);
+
+        } catch (error: unknown) {
+            if (axios.isAxiosError(error)) {
+                let errorMessage = `Error calling Ollama API for chat: ${error.message}`;
+                  if (error.response) {
+                    errorMessage += ` Status: ${error.response.status}. Data: ${JSON.stringify(error.response.data)}`;
+                    if (logLevel === 'debug') {
+                        console.error(`[OllamaCodeFixer CHAT] Ollama API Error Response: ${JSON.stringify(error.response.data, null, 2)}`);
+                        console.error(`[OllamaCodeFixer CHAT] Request config that failed:`, error.config);
+                    }
+                } else if (error.request) {
+                    errorMessage += ' No response received from Ollama.';
+                }
+                
+                console.error('[OllamaCodeFixer CHAT] API Call Error:', errorMessage, error.config);
+                return `Ошибка взаимодействия с Ollama: ${errorMessage}`;
+            }
+            
+            // Обработка не-Axios ошибок
+            const errorMessage = error instanceof Error ? error.message : 'Неизвестная ошибка';
+            console.error('[OllamaCodeFixer CHAT] Non-Axios Error:', errorMessage);
+            return `Ошибка взаимодействия с Ollama: ${errorMessage}`;
+        }
+    }    private async applyCodeToEditor(code: string) {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
             vscode.window.showErrorMessage('Нет активного редактора для вставки кода');
@@ -176,6 +245,18 @@ export class OllamaCodeFixerChatProvider {
         });
 
         vscode.window.showInformationMessage('Код успешно применён!');
+    }
+
+    private async installOllamaModel(modelName: string): Promise<void> {
+        const terminal = vscode.window.createTerminal('Ollama Model Installation');
+        terminal.show();
+        terminal.sendText(`ollama pull ${modelName}`);
+        
+        // Показываем информационное сообщение
+        vscode.window.showInformationMessage(
+            `Установка модели ${modelName}. Пожалуйста, дождитесь завершения в терминале.`,
+            'Понятно'
+        );
     }
 
     private getWebviewContent(): string {
@@ -549,9 +630,7 @@ export class OllamaCodeFixerChatProvider {
             </script>
         </body>
         </html>`;
-    }
-
-    public dispose() {
+    }    public dispose() {
         while (this._disposables.length) {
             const x = this._disposables.pop();
             if (x) {
