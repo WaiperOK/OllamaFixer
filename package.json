@@ -1,0 +1,151 @@
+{
+  "name": "ollama-code-fixer",
+  "displayName": "Ollama Code Fixer",
+  "description": "AI code fixer using local Ollama models in VS Code.",
+  "version": "0.2.0",
+  "publisher": "waiper",
+  "icon": "icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Machine Learning",
+    "Linters",
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:ollama-code-fixer.fixSelectedCode",
+    "onCommand:ollama-code-fixer.checkApiStatus",
+    "onCommand:ollama-code-fixer.openChat",
+    "onView:ollamaCodeFixerView"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ollama-code-fixer.fixSelectedCode",
+        "title": "Ollama: Fix Selected Code",
+        "category": "Ollama Code Fixer",
+        "icon": {
+          "light": "images/fix-light.png",
+          "dark": "images/fix-dark.png"
+        }
+      },
+      {
+        "command": "ollama-code-fixer.checkApiStatus",
+        "title": "Ollama: Check API Status",
+        "category": "Ollama Code Fixer"
+      },
+      {
+        "command": "ollama-code-fixer.openChat",
+        "title": "Ollama: Open Chat",
+        "category": "Ollama Code Fixer",
+        "icon": {
+          "light": "images/chat-light.png",
+          "dark": "images/chat-dark.png"
+        }
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "when": "editorHasSelection",
+          "command": "ollama-code-fixer.fixSelectedCode",
+          "group": "navigation@5"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "ollama-code-fixer.openChat",
+          "when": "true"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Ollama Code Fixer",
+      "properties": {
+        "ollamaCodeFixer.ollamaApiUrl": {
+          "type": "string",
+          "default": "http://localhost:11434/api/generate",
+          "description": "URL for the Ollama API /api/generate endpoint."
+        },
+        "ollamaCodeFixer.modelName": {
+          "type": "string",
+          "default": "gemma:4b",
+          "description": "The Ollama model to use (e.g., 'gemma:12b', 'codellama:latest'). Make sure it's pulled in Ollama."
+        },
+        "ollamaCodeFixer.requestTimeout": {
+          "type": "integer",
+          "default": 90000,
+          "description": "Timeout in milliseconds for requests to the Ollama API."
+        },
+        "ollamaCodeFixer.enableNotifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable or disable notifications from Ollama Code Fixer."
+        },
+        "ollamaCodeFixer.logLevel": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warn",
+            "info",
+            "debug"
+          ],
+          "default": "info",
+          "description": "Set the logging level for Ollama Code Fixer."
+        },
+        "ollamaCodeFixer.promptStructure": {
+          "type": "object",
+          "default": {
+            "prefix": "[INST] You are an expert AI programming assistant. Your task is to analyze the provided code snippet, identify any errors or areas for improvement, and return *only* the corrected and optimized code block. Do not include any explanations, apologies, or markdown formatting around the code block itself unless the language implies it (like for markdown file corrections). If the code is already perfect or no changes are needed, return the original code snippet as is.\n\nLanguage: {language}\n\nProblematic Code Snippet:\n```\n",
+            "suffix": "\n```\n[/INST]\nCorrected Code Snippet:\n```\n"
+          },
+          "description": "Structure for prompts sent to Ollama with prefix and suffix."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ollama-code-fixer-sidebar",
+          "title": "Ollama Code Fixer",
+          "icon": "images/sidebar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "ollama-code-fixer-sidebar": [
+        {
+          "id": "ollamaCodeFixerView",
+          "name": "Fixer Tools",
+          "icon": "images/fixer-tool.svg"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.6",
+    "@types/node": "18.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vscode/test-cli": "^0.0.9",
+    "@vscode/test-electron": "^2.3.9",
+    "electron": "^36.3.2",
+    "eslint": "^8.57.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "axios": "^1.6.0"
+  }
+}
